@@ -24,7 +24,83 @@ A modern HR management system built with Next.js 16, featuring employee manageme
 
 ---
 
-## 🚀 Setup Guide
+## � How It Works
+
+### Authentication Flow
+
+1. **Login/Register** - Users authenticate via the login page using email and password
+2. **Session Management** - NextAuth.js handles secure session management with JWT tokens
+3. **Role-Based Routing** - After login, users are redirected to their respective dashboards:
+   - Admins → `/admin` dashboard
+   - Employees → `/employee` dashboard
+4. **Protected Routes** - Middleware ensures users can only access pages based on their role
+
+### Admin Dashboard
+
+The admin has full control over the HR system:
+
+| Module | Functionality |
+|--------|---------------|
+| **Dashboard** | Overview with analytics charts showing attendance trends, department distribution, and payroll summaries |
+| **Employees** | Add, edit, view, and deactivate employees. Manage employee details like department, position, and salary |
+| **Attendance** | View attendance records of all employees. See daily/monthly attendance reports |
+| **Leave Requests** | Review pending leave requests. Approve or reject leave applications with comments |
+| **Payroll** | Process monthly payroll. View salary breakdowns, deductions, and generate payslips |
+
+### Employee Dashboard
+
+Employees have access to their personal HR information:
+
+| Module | Functionality |
+|--------|---------------|
+| **Dashboard** | Personal overview with attendance stats, leave balance, and recent activities |
+| **Profile** | View and update personal information |
+| **Attendance** | Mark daily attendance (check-in/check-out). View personal attendance history |
+| **Leave** | Apply for leave (Paid, Sick, Unpaid). Track leave request status and remaining balance |
+| **Payroll** | View salary slips and payment history |
+
+### Database Models
+
+The system uses the following core data models:
+
+```
+User ─────────────── Employee (1:1)
+  │                      │
+  │                      ├── Attendance (1:N)
+  │                      ├── LeaveRequest (1:N)
+  │                      └── Payroll (1:N)
+```
+
+- **User** - Authentication data (email, password, role)
+- **Employee** - Personal details (name, department, position, salary, join date)
+- **Attendance** - Daily attendance records (date, check-in/out time, status)
+- **LeaveRequest** - Leave applications (type, dates, status, reason)
+- **Payroll** - Monthly salary records (basic, deductions, net pay)
+
+### API Routes
+
+The application exposes RESTful API endpoints:
+
+| Endpoint | Methods | Description |
+|----------|---------|-------------|
+| `/api/auth/*` | POST | Authentication (login, register, session) |
+| `/api/employees` | GET, POST, PUT, DELETE | Employee CRUD operations |
+| `/api/attendance` | GET, POST | Attendance management |
+| `/api/leave` | GET, POST, PUT | Leave request management |
+| `/api/payroll` | GET, POST | Payroll processing |
+
+### UI Components
+
+- **Sidebar** - Navigation menu with role-based links
+- **Navbar** - Top bar with user info, theme toggle, and logout
+- **Command Menu** - Quick navigation with `Ctrl/Cmd + K`
+- **Data Tables** - Sortable, filterable tables for data display
+- **Charts** - Interactive charts for analytics (Recharts)
+- **Theme Toggle** - Switch between light and dark modes
+
+---
+
+## �🚀 Setup Guide
 
 For detailed installation and setup instructions, please refer to the **[SETUP.md](SETUP.md)** file.
 
@@ -119,27 +195,6 @@ After seeding the database, you can log in with these accounts:
 | `npx prisma migrate dev` | Create new migration |
 | `npx prisma migrate deploy` | Apply migrations |
 | `npx prisma generate` | Generate Prisma client |
-
----
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**1. Database connection error**
-- Verify your `DATABASE_URL` is correct
-- Ensure your database is running and accessible
-- Check if SSL is required (add `?sslmode=require` for Neon)
-
-**2. Prisma client not found**
-- Run `npx prisma generate` to regenerate the client
-
-**3. Migration errors**
-- Make sure your database is empty or run `npx prisma migrate reset` (⚠️ this will delete all data)
-
-**4. Authentication issues**
-- Ensure `AUTH_SECRET` is set in your `.env` file
-- Verify `NEXTAUTH_URL` matches your app URL
 
 ---
 
