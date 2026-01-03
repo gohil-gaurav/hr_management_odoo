@@ -129,7 +129,7 @@ export default function AdminPayrollPage() {
           }
 
           // Estimate bonus (can be updated later when bonus field is added)
-          const bonus = Math.round((payrollInfo.basicSalary || 0) * 0.1); // 10% of base
+          const bonus = Math.round((payrollInfo.baseSalary || 0) * 0.1); // 10% of base
 
           return {
             id: emp.id,
