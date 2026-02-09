@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { useSession } from "next-auth/react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { 
-  Clock, 
-  LogIn, 
-  LogOut, 
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { AttendanceCalendar } from "@/components/dashboard/attendance-calendar";
+import {
+  Clock,
+  LogIn,
+  LogOut,
   Calendar,
   CheckCircle2,
   XCircle,
@@ -17,6 +18,9 @@ import {
   Timer,
   Loader2
 } from "lucide-react";
+import { useCurrentEmployee, useEmployeeAttendance, useCalendarMonth, useAttendanceCheckInOut } from "@/lib/hooks";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/hooks/query-keys";
 
 interface AttendanceRecord {
   id: string;
@@ -49,7 +53,10 @@ const getStatusBadge = (status: string) => {
 };
 
 export default function EmployeeAttendancePage() {
-  const { data: session } = useSession();
+  const queryClient = useQueryClient();
+  const { employeeId, isLoading: isEmployeeLoading } = useCurrentEmployee();
+  const checkInOutMutation = useAttendanceCheckInOut();
+
   const [isCheckedIn, setIsCheckedIn] = useState(false);
   const [isCheckedOut, setIsCheckedOut] = useState(false);
   const [checkInTime, setCheckInTime] = useState<Date | null>(null);
@@ -57,9 +64,121 @@ export default function EmployeeAttendancePage() {
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [elapsedTime, setElapsedTime] = useState<string>("00:00:00");
   const [mounted, setMounted] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [monthlyAttendance, setMonthlyAttendance] = useState<AttendanceRecord[]>([]);
-  const [employeeId, setEmployeeId] = useState<string | null>(null);
+  
+  // Add month/year selection state
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1);
+  
+  // Year and month options
+  const yearOptions = [2024, 2025, 2026, 2027];
+  const monthOptions = [
+    { value: 1, label: "January" },
+    { value: 2, label: "February" },
+    { value: 3, label: "March" },
+    { value: 4, label: "April" },
+    { value: 5, label: "May" },
+    { value: 6, label: "June" },
+    { value: 7, label: "July" },
+    { value: 8, label: "August" },
+    { value: 9, label: "September" },
+    { value: 10, label: "October" },
+    { value: 11, label: "November" },
+    { value: 12, label: "December" },
+  ];
+
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
+
+  // ── Today's attendance query ────────────────────────────
+  const now = new Date();
+  const todayStart = useMemo(() => new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())).toISOString(), [now.getFullYear(), now.getMonth(), now.getDate()]);
+  const todayEnd = useMemo(() => new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() + 1)).toISOString(), [now.getFullYear(), now.getMonth(), now.getDate()]);
+  const todayQuery = useEmployeeAttendance(employeeId, todayStart, todayEnd);
+
+  // ── Monthly attendance query (for table view) ──────────
+  const monthStart = useMemo(() => new Date(Date.UTC(selectedYear, selectedMonth - 1, 1)).toISOString(), [selectedYear, selectedMonth]);
+  const monthEnd = useMemo(() => new Date(Date.UTC(selectedYear, selectedMonth, 0, 23, 59, 59, 999)).toISOString(), [selectedYear, selectedMonth]);
+  const monthlyQuery = useEmployeeAttendance(employeeId, monthStart, monthEnd);
+
+  // ── Calendar queries (current month + previous month) ──
+  const currentMonth = now.getMonth() + 1;
+  const currentYear = now.getFullYear();
+  const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+  const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+  const calendarCurrentQuery = useCalendarMonth(employeeId, currentYear, currentMonth);
+  const calendarPrevQuery = useCalendarMonth(employeeId, prevYear, prevMonth);
+
+  // Track which extra months have been fetched for the calendar
+  const fetchedMonthsRef = useRef<Set<string>>(new Set([`${currentYear}-${currentMonth}`, `${prevYear}-${prevMonth}`]));
+  const [extraCalendarData, setExtraCalendarData] = useState<{date: string; status: string}[]>([]);
+
+  // Combine calendar data from queries + any extra months fetched via navigation
+  const calendarAttendance = useMemo(() => {
+    const currentData = (calendarCurrentQuery.data || []).map((r: any) => ({ date: r.date, status: r.status }));
+    const prevData = (calendarPrevQuery.data || []).map((r: any) => ({ date: r.date, status: r.status }));
+    return [...prevData, ...currentData, ...extraCalendarData];
+  }, [calendarCurrentQuery.data, calendarPrevQuery.data, extraCalendarData]);
+
+  // When user navigates to a new month in the calendar, fetch that month's data
+  const handleCalendarMonthChange = async (year: number, month: number) => {
+    const key = `${year}-${month}`;
+    if (fetchedMonthsRef.current.has(key) || !employeeId) return;
+    fetchedMonthsRef.current.add(key);
+
+    try {
+      const firstDay = new Date(Date.UTC(year, month - 1, 1));
+      const lastDay = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+      const res = await fetch(
+        `/api/attendance?employeeId=${employeeId}&startDate=${firstDay.toISOString()}&endDate=${lastDay.toISOString()}`
+      );
+      const data = await res.json();
+      if (data.attendanceRecords && Array.isArray(data.attendanceRecords)) {
+        const mapped = data.attendanceRecords.map((record: any) => ({
+          date: record.date,
+          status: record.status?.toLowerCase().replace('_', '-') || 'not-marked',
+        }));
+        if (mapped.length > 0) {
+          setExtraCalendarData(prev => {
+            const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+            const filtered = prev.filter(r => !r.date.startsWith(monthPrefix));
+            return [...filtered, ...mapped];
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching calendar month:', error);
+    }
+  };
+
+  // Format monthly records for the table
+  const monthlyAttendance: AttendanceRecord[] = useMemo(() => {
+    const records = monthlyQuery.data?.attendanceRecords;
+    if (!records || !Array.isArray(records)) return [];
+    return records.map((record: any) => {
+      const date = new Date(record.date);
+      const checkIn = record.checkIn ? new Date(record.checkIn) : null;
+      const checkOut = record.checkOut ? new Date(record.checkOut) : null;
+
+      let hours = "-";
+      if (checkIn && checkOut) {
+        const diff = checkOut.getTime() - checkIn.getTime();
+        const h = Math.floor(diff / (1000 * 60 * 60));
+        const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        hours = `${h}h ${m}m`;
+      }
+
+      return {
+        id: record.id,
+        date: record.date,
+        day: date.toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' }),
+        checkIn: checkIn ? new Date(checkIn.getTime() + IST_OFFSET_MS).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' }) : null,
+        checkOut: checkOut ? new Date(checkOut.getTime() + IST_OFFSET_MS).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' }) : null,
+        status: record.status?.toLowerCase().replace('_', '-') || 'not-marked',
+        hours,
+      };
+    });
+  }, [monthlyQuery.data, IST_OFFSET_MS]);
+
+  const loading = isEmployeeLoading || todayQuery.isLoading || monthlyQuery.isLoading;
 
   // Initialize and update current time
   useEffect(() => {
@@ -84,168 +203,74 @@ export default function EmployeeAttendancePage() {
     }
   }, [currentTime, checkInTime, isCheckedOut]);
 
-  // Fetch employee ID
-  const fetchEmployeeId = useCallback(async () => {
-    if (!session?.user?.email) return null;
-
-    try {
-      const res = await fetch(`/api/employees?email=${session.user.email}`);
-      const data = await res.json();
-      if (data.employee) {
-        setEmployeeId(data.employee.id);
-        return data.employee.id;
-      }
-    } catch (error) {
-      console.error("Error fetching employee:", error);
-    }
-    return null;
-  }, [session?.user?.email]);
-
-  // Fetch today's attendance
-  const fetchTodayAttendance = useCallback(async (empId: string) => {
-    try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      const res = await fetch(
-        `/api/attendance?employeeId=${empId}&startDate=${today.toISOString()}&endDate=${tomorrow.toISOString()}`
-      );
-      const data = await res.json();
-      
-      if (data.attendanceRecords && data.attendanceRecords.length > 0) {
-        const todayRecord = data.attendanceRecords[0];
-        setIsCheckedIn(!!todayRecord.checkIn);
-        setIsCheckedOut(!!todayRecord.checkOut);
-        setCheckInTime(todayRecord.checkIn ? new Date(todayRecord.checkIn) : null);
-        setCheckOutTime(todayRecord.checkOut ? new Date(todayRecord.checkOut) : null);
-      }
-    } catch (error) {
-      console.error("Error fetching today's attendance:", error);
-    }
-  }, []);
-
-  // Fetch monthly attendance
-  const fetchMonthlyAttendance = useCallback(async (empId: string) => {
-    try {
-      const today = new Date();
-      const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-      const lastDayOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-
-      const res = await fetch(
-        `/api/attendance?employeeId=${empId}&startDate=${firstDayOfMonth.toISOString()}&endDate=${lastDayOfMonth.toISOString()}`
-      );
-      const data = await res.json();
-      
-      if (data.attendanceRecords) {
-        const formatted = data.attendanceRecords.map((record: any) => {
-          const date = new Date(record.date);
-          const checkIn = record.checkIn ? new Date(record.checkIn) : null;
-          const checkOut = record.checkOut ? new Date(record.checkOut) : null;
-          
-          let hours = "-";
-          if (checkIn && checkOut) {
-            const diff = checkOut.getTime() - checkIn.getTime();
-            const h = Math.floor(diff / (1000 * 60 * 60));
-            const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-            hours = `${h}h ${m}m`;
-          }
-
-          return {
-            id: record.id,
-            date: record.date,
-            day: date.toLocaleDateString('en-US', { weekday: 'long' }),
-            checkIn: checkIn ? checkIn.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : null,
-            checkOut: checkOut ? checkOut.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : null,
-            status: record.status?.toLowerCase().replace('_', '-') || 'not-marked',
-            hours,
-          };
-        });
-        setMonthlyAttendance(formatted);
-      }
-      setLoading(false);
-    } catch (error) {
-      console.error("Error fetching monthly attendance:", error);
-      setLoading(false);
-    }
-  }, []);
-
-  // Load data on mount
+  // Derive check-in/check-out state from today's attendance query
   useEffect(() => {
-    const loadData = async () => {
-      const empId = await fetchEmployeeId();
-      if (empId) {
-        await Promise.all([
-          fetchTodayAttendance(empId),
-          fetchMonthlyAttendance(empId),
-        ]);
-      } else {
-        setLoading(false);
-      }
-    };
-    loadData();
-  }, [fetchEmployeeId, fetchTodayAttendance, fetchMonthlyAttendance]);
+    if (todayQuery.data?.attendanceRecords?.length > 0) {
+      const todayRecord = todayQuery.data.attendanceRecords[0];
+      setIsCheckedIn(!!todayRecord.checkIn);
+      setIsCheckedOut(!!todayRecord.checkOut);
+      setCheckInTime(todayRecord.checkIn ? new Date(todayRecord.checkIn) : null);
+      setCheckOutTime(todayRecord.checkOut ? new Date(todayRecord.checkOut) : null);
+    }
+  }, [todayQuery.data]);
 
   const handleCheckIn = async () => {
     if (!employeeId) return;
 
-    try {
-      const res = await fetch("/api/attendance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ employeeId, type: "checkIn" }),
-      });
+    // Snapshot previous state for rollback
+    const prevIsCheckedIn = isCheckedIn;
+    const prevIsCheckedOut = isCheckedOut;
+    const prevCheckInTime = checkInTime;
 
-      if (res.ok) {
-        const data = await res.json();
-        const now = new Date(data.attendance.checkIn);
-        setCheckInTime(now);
-        setIsCheckedIn(true);
-        setIsCheckedOut(false);
-        setCheckOutTime(null);
-        // Refresh monthly attendance
-        if (employeeId) {
-          await fetchMonthlyAttendance(employeeId);
-          await fetchTodayAttendance(employeeId);
-        }
+    // Optimistic Update
+    const optimisticNow = new Date();
+    setCheckInTime(optimisticNow);
+    setIsCheckedIn(true);
+    setIsCheckedOut(false);
+    setCheckOutTime(null);
+
+    try {
+      const data = await checkInOutMutation.mutateAsync({ employeeId, type: "checkIn" });
+      // Update with server time
+      const serverNow = data.attendance?.checkIn ? new Date(data.attendance.checkIn) : new Date();
+      setCheckInTime(serverNow);
+      setIsCheckedIn(!!data.attendance?.checkIn);
+    } catch (error: any) {
+      const message = error?.message || "Failed to check in";
+      if (message.includes("leave")) {
+        alert(`❌ Cannot Mark Attendance\n\nYou are on approved leave today.\n\nPlease contact HR if this is incorrect.`);
       } else {
-        const error = await res.json();
-        alert(error.error || "Failed to check in");
+        alert(message);
       }
-    } catch (error) {
-      console.error("Error checking in:", error);
-      alert("Failed to check in");
+      // Rollback on error
+      setIsCheckedIn(prevIsCheckedIn);
+      setIsCheckedOut(prevIsCheckedOut);
+      setCheckInTime(prevCheckInTime);
     }
   };
 
   const handleCheckOut = async () => {
     if (!employeeId) return;
 
-    try {
-      const res = await fetch("/api/attendance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ employeeId, type: "checkOut" }),
-      });
+    // Snapshot previous state for rollback
+    const prevIsCheckedOut = isCheckedOut;
+    const prevCheckOutTime = checkOutTime;
 
-      if (res.ok) {
-        const data = await res.json();
-        const now = new Date(data.attendance.checkOut);
-        setCheckOutTime(now);
-        setIsCheckedOut(true);
-        // Refresh monthly attendance
-        if (employeeId) {
-          await fetchMonthlyAttendance(employeeId);
-          await fetchTodayAttendance(employeeId);
-        }
-      } else {
-        const error = await res.json();
-        alert(error.error || "Failed to check out");
-      }
-    } catch (error) {
-      console.error("Error checking out:", error);
-      alert("Failed to check out");
+    // Optimistic Update
+    const optimisticNow = new Date();
+    setCheckOutTime(optimisticNow);
+    setIsCheckedOut(true);
+
+    try {
+      const data = await checkInOutMutation.mutateAsync({ employeeId, type: "checkOut" });
+      const serverNow = data.attendance?.checkOut ? new Date(data.attendance.checkOut) : new Date();
+      setCheckOutTime(serverNow);
+      setIsCheckedOut(!!data.attendance?.checkOut);
+    } catch (error: any) {
+      alert(error?.message || "Failed to check out");
+      // Rollback on error
+      setIsCheckedOut(prevIsCheckedOut);
+      setCheckOutTime(prevCheckOutTime);
     }
   };
 
@@ -260,7 +285,7 @@ export default function EmployeeAttendancePage() {
     return "not-marked";
   };
 
-  const todayDate = mounted && currentTime 
+  const todayDate = mounted && currentTime
     ? currentTime.toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
     : "Loading...";
 
@@ -319,12 +344,12 @@ export default function EmployeeAttendancePage() {
                   </p>
                 </div>
               ) : (
-                <Button 
-                  onClick={handleCheckIn} 
+                <Button
+                  onClick={handleCheckIn}
                   className="w-full bg-green-500 hover:bg-green-600"
-                  disabled={isCheckedIn}
+                  disabled={isCheckedIn || checkInOutMutation.isPending}
                 >
-                  <LogIn className="h-4 w-4 mr-2" />
+                  {checkInOutMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <LogIn className="h-4 w-4 mr-2" />}
                   Check In
                 </Button>
               )}
@@ -345,12 +370,13 @@ export default function EmployeeAttendancePage() {
                   </p>
                 </div>
               ) : isCheckedIn ? (
-                <Button 
-                  onClick={handleCheckOut} 
+                <Button
+                  onClick={handleCheckOut}
                   variant="outline"
                   className="w-full border-red-200 text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
+                  disabled={checkInOutMutation.isPending}
                 >
-                  <LogOut className="h-4 w-4 mr-2" />
+                  {checkInOutMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <LogOut className="h-4 w-4 mr-2" />}
                   Check Out
                 </Button>
               ) : (
@@ -395,91 +421,123 @@ export default function EmployeeAttendancePage() {
         </TabsList>
 
         <TabsContent value="daily">
-          <Card>
-            <CardHeader>
-              <CardTitle>Attendance History</CardTitle>
-              <CardDescription>Your recent attendance records</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {monthlyAttendance.map((record, index) => (
-                  <div 
-                    key={index} 
-                    className={`flex items-center justify-between p-4 rounded-lg ${
-                      record.status === "weekend" || record.status === "holiday" 
-                        ? "bg-muted/30" 
-                        : "bg-muted/50"
-                    }`}
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="text-center min-w-15">
-                        <p className="text-lg font-bold">{new Date(record.date).getDate()}</p>
-                        <p className="text-xs text-muted-foreground">{new Date(record.date).toLocaleDateString('en-US', { weekday: 'short' })}</p>
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          {getStatusBadge(record.status)}
-                        </div>
-                        {record.checkIn && (
-                          <p className="text-sm text-muted-foreground mt-1">
-                            {record.checkIn} - {record.checkOut || "Working..."}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="font-semibold">{record.hours}</p>
-                      <p className="text-xs text-muted-foreground">Hours</p>
-                    </div>
+          <div className="space-y-4">
+            {/* Month/Year Selectors */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Calendar className="h-5 w-5" />
+                  Select Month & Year
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex gap-4">
+                  <div className="flex-1">
+                    <label className="text-sm font-medium">Month</label>
+                    <Select value={selectedMonth.toString()} onValueChange={(v) => setSelectedMonth(parseInt(v))}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {monthOptions.map((month) => (
+                          <SelectItem key={month.value} value={month.value.toString()}>
+                            {month.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+                  <div className="flex-1">
+                    <label className="text-sm font-medium">Year</label>
+                    <Select value={selectedYear.toString()} onValueChange={(v) => setSelectedYear(parseInt(v))}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {yearOptions.map((year) => (
+                          <SelectItem key={year} value={year.toString()}>
+                            {year}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <p className="text-sm text-muted-foreground mt-2">
+                  Showing {monthOptions.find(m => m.value === selectedMonth)?.label} {selectedYear} 
+                  {monthlyAttendance.length > 0 && ` - ${monthlyAttendance.length} records found`}
+                </p>
+              </CardContent>
+            </Card>
+
+            {/* Attendance History */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Attendance History</CardTitle>
+                <CardDescription>Your attendance records for {monthOptions.find(m => m.value === selectedMonth)?.label} {selectedYear}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {loading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="h-6 w-6 animate-spin" />
+                    <span className="ml-2">Loading attendance data...</span>
+                  </div>
+                ) : monthlyAttendance.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Calendar className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                    <p>No attendance records found for this period</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {monthlyAttendance.map((record, index) => (
+                      <div
+                        key={index}
+                        className={`flex items-center justify-between p-4 rounded-lg ${record.status === "weekend" || record.status === "holiday"
+                          ? "bg-muted/30"
+                          : "bg-muted/50"
+                          }`}
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className="text-center min-w-15">
+                            <p className="text-lg font-bold">{new Date(record.date).getDate()}</p>
+                            <p className="text-xs text-muted-foreground">{new Date(record.date).toLocaleDateString('en-US', { weekday: 'short' })}</p>
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              {getStatusBadge(record.status)}
+                            </div>
+                            {record.checkIn && (
+                              <p className="text-sm text-muted-foreground mt-1">
+                                {record.checkIn} - {record.checkOut || "Working..."}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-semibold">{record.hours}</p>
+                          <p className="text-xs text-muted-foreground">Hours</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
 
         <TabsContent value="monthly">
-          <Card>
-            <CardHeader>
-              <CardTitle>Monthly Summary - January 2026</CardTitle>
-              <CardDescription>Your attendance overview for this month</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-4 md:grid-cols-4">
-                <div className="text-center p-6 bg-green-50 rounded-xl">
-                  <CheckCircle2 className="h-8 w-8 text-green-500 mx-auto mb-2" />
-                  <p className="text-3xl font-bold text-green-600">22</p>
-                  <p className="text-sm text-green-600">Present Days</p>
-                </div>
-                <div className="text-center p-6 bg-red-50 rounded-xl">
-                  <XCircle className="h-8 w-8 text-red-500 mx-auto mb-2" />
-                  <p className="text-3xl font-bold text-red-600">1</p>
-                  <p className="text-sm text-red-600">Absent Days</p>
-                </div>
-                <div className="text-center p-6 bg-amber-50 rounded-xl">
-                  <AlertCircle className="h-8 w-8 text-amber-500 mx-auto mb-2" />
-                  <p className="text-3xl font-bold text-amber-600">1</p>
-                  <p className="text-sm text-amber-600">Half Days</p>
-                </div>
-                <div className="text-center p-6 bg-blue-50 rounded-xl">
-                  <Calendar className="h-8 w-8 text-blue-500 mx-auto mb-2" />
-                  <p className="text-3xl font-bold text-blue-600">2</p>
-                  <p className="text-sm text-blue-600">Leave Days</p>
-                </div>
-              </div>
-
-              <div className="mt-6 p-4 bg-muted rounded-lg">
-                <div className="flex justify-between items-center">
-                  <span className="font-medium">Total Work Hours</span>
-                  <span className="text-2xl font-bold">176h 30m</span>
-                </div>
-                <div className="flex justify-between items-center mt-2 text-sm text-muted-foreground">
-                  <span>Expected Hours</span>
-                  <span>184h 00m</span>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          {/* Attendance Calendar */}
+          {loading ? (
+            <Card>
+              <CardContent className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span className="ml-2">Loading attendance data...</span>
+              </CardContent>
+            </Card>
+          ) : (
+            <AttendanceCalendar attendanceData={calendarAttendance} onMonthChange={handleCalendarMonthChange} />
+          )}
         </TabsContent>
       </Tabs>
 
@@ -491,7 +549,7 @@ export default function EmployeeAttendancePage() {
             <div>
               <h4 className="font-medium text-amber-800">Important Notice</h4>
               <p className="text-sm text-amber-700 mt-1">
-                You cannot edit past attendance records. If you have any discrepancies, 
+                You cannot edit past attendance records. If you have any discrepancies,
                 please contact your manager or HR department for corrections.
               </p>
             </div>

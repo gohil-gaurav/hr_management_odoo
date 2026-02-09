@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/auth";
+import { TAGS } from "@/lib/data";
+import { payrollCreateSchema, payrollUpdateSchema, formatZodError } from "@/lib/validators";
+import { logger } from "@/lib/logger";
 
 // GET payroll records
 export async function GET(request: NextRequest) {
@@ -13,11 +17,15 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const employeeId = searchParams.get("employeeId");
 
+    logger.info("Payroll GET request", { url: request.url, employeeId, user: session?.user?.email });
+
     // Get current user to check permissions
-    const user = await prisma.user.findUnique({
-      where: { email: session.user.email! },
-      include: { employee: true },
-    });
+    // Optimized: Use session data directly
+    const user = {
+      role: session.user.role,
+      email: session.user.email,
+      employee: session.user.employeeId ? { id: session.user.employeeId } : null
+    };
 
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
@@ -66,7 +74,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ payroll });
   } catch (error) {
-    console.error("Error fetching payroll:", error);
+    logger.error("Error fetching payroll", error);
     return NextResponse.json({ error: "Failed to fetch payroll records" }, { status: 500 });
   }
 }
@@ -74,14 +82,58 @@ export async function GET(request: NextRequest) {
 // POST create payroll
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+    if (session?.user?.role !== "ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    }
+
     const body = await request.json();
-    // TODO: Validate and save payroll to database using Prisma
-    
-    return NextResponse.json({ 
-      message: "Payroll created", 
-      payroll: body 
+
+    // Validate input with Zod
+    const validation = payrollCreateSchema.safeParse(body);
+    if (!validation.success) {
+      return NextResponse.json({
+        error: "Validation failed",
+        details: formatZodError(validation.error)
+      }, { status: 400 });
+    }
+
+    const { employeeId, basicSalary, hra, allowances, deductions } = validation.data;
+
+    const basic = Number(basicSalary);
+    const hraVal = Number(hra || 0);
+    const allow = Number(allowances || 0);
+    const deduct = Number(deductions || 0);
+    const netSalary = (basic + hraVal + allow) - deduct;
+
+    const payroll = await prisma.payroll.upsert({
+      where: { employeeId },
+      create: {
+        employeeId,
+        basicSalary: basic,
+        hra: hraVal,
+        allowances: allow,
+        deductions: deduct,
+        netSalary,
+      },
+      update: {
+        basicSalary: basic,
+        hra: hraVal,
+        allowances: allow,
+        deductions: deduct,
+        netSalary,
+      }
+    });
+
+    revalidateTag(TAGS.payroll, "max");
+    revalidateTag(TAGS.employees, "max");
+
+    return NextResponse.json({
+      message: "Payroll saved successfully",
+      payroll
     }, { status: 201 });
   } catch (error) {
+    logger.error("Error creating/updating payroll", error);
     return NextResponse.json({ error: "Failed to create payroll" }, { status: 500 });
   }
 }
@@ -89,14 +141,61 @@ export async function POST(request: NextRequest) {
 // PUT update payroll
 export async function PUT(request: NextRequest) {
   try {
+    const session = await auth();
+    if (session?.user?.role !== "ADMIN") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    }
+
     const body = await request.json();
-    // TODO: Update payroll in database using Prisma
-    
-    return NextResponse.json({ 
-      message: "Payroll updated", 
-      payroll: body 
+    const { id, basicSalary, hra, allowances, deductions } = body;
+    logger.info("Payroll PUT request", { id, basicSalary, hra, user: session?.user?.email });
+
+    if (!id) {
+      return NextResponse.json({ error: "Payroll ID is required" }, { status: 400 });
+    }
+
+    // Calculate new net salary if financial fields are present
+    const dataToUpdate: {
+      basicSalary?: number;
+      hra?: number;
+      allowances?: number;
+      deductions?: number;
+      netSalary?: number;
+    } = {};
+    if (basicSalary !== undefined) dataToUpdate.basicSalary = Number(basicSalary);
+    if (hra !== undefined) dataToUpdate.hra = Number(hra);
+    if (allowances !== undefined) dataToUpdate.allowances = Number(allowances);
+    if (deductions !== undefined) dataToUpdate.deductions = Number(deductions);
+
+    // We need to fetch existing values to calc net salary correctly if partial update, 
+    // but for simplicity assuming full financial update or just separate calculates.
+    // Better to recalculate netSalary if any component changes.
+
+    // Fetch current to calculate net
+    const currentPayroll = await prisma.payroll.findUnique({ where: { id } });
+    if (!currentPayroll) return NextResponse.json({ error: "Payroll not found" }, { status: 404 });
+
+    const newBasic = basicSalary !== undefined ? Number(basicSalary) : currentPayroll.basicSalary;
+    const newHra = hra !== undefined ? Number(hra) : currentPayroll.hra;
+    const newAllow = allowances !== undefined ? Number(allowances) : currentPayroll.allowances;
+    const newDeduct = deductions !== undefined ? Number(deductions) : currentPayroll.deductions;
+
+    dataToUpdate.netSalary = (newBasic + newHra + newAllow) - newDeduct;
+
+    const payroll = await prisma.payroll.update({
+      where: { id },
+      data: dataToUpdate
+    });
+
+    revalidateTag(TAGS.payroll, "max");
+    revalidateTag(TAGS.employees, "max");
+
+    return NextResponse.json({
+      message: "Payroll updated",
+      payroll
     });
   } catch (error) {
+    logger.error("Error updating payroll", error);
     return NextResponse.json({ error: "Failed to update payroll" }, { status: 500 });
   }
 }

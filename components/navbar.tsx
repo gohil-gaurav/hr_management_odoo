@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +16,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { CommandMenu } from "@/components/command-menu";
 import {
   Bell,
   Search,
@@ -34,53 +33,24 @@ import {
   Clock,
   DollarSign,
   AlertCircle,
+  Menu
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import dynamic from "next/dynamic";
+import {
+  Sheet,
+  SheetContent,
+  SheetTrigger,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { SidebarContent } from "@/components/sidebar";
+import { useNotifications } from "@/contexts/notification-context";
 
-// Mock notifications - In production, fetch from API
-const notifications = [
-  {
-    id: 1,
-    type: "leave_approved",
-    title: "Leave Request Approved",
-    message: "Your vacation leave for Jan 15-17 has been approved",
-    time: "2 hours ago",
-    read: false,
-  },
-  {
-    id: 2,
-    type: "leave_pending",
-    title: "New Leave Request",
-    message: "John Doe requested sick leave for Jan 10",
-    time: "3 hours ago",
-    read: false,
-  },
-  {
-    id: 3,
-    type: "leave_rejected",
-    title: "Leave Request Rejected",
-    message: "Your personal leave for Jan 20 was rejected",
-    time: "1 day ago",
-    read: true,
-  },
-  {
-    id: 4,
-    type: "payroll",
-    title: "Payroll Processed",
-    message: "December 2025 salary has been credited",
-    time: "2 days ago",
-    read: true,
-  },
-  {
-    id: 5,
-    type: "reminder",
-    title: "Attendance Reminder",
-    message: "Don't forget to check out before leaving",
-    time: "3 days ago",
-    read: true,
-  },
-];
+// Dynamically import CommandMenu to prevent hydration mismatch
+const CommandMenu = dynamic(() => import("@/components/command-menu").then(mod => ({ default: mod.CommandMenu })), {
+  ssr: false,
+});
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -89,12 +59,26 @@ export default function Navbar() {
   const [mounted, setMounted] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+  const [isSheetOpen, setIsSheetOpen] = useState(false);
   const isAdmin = pathname?.startsWith("/admin");
+  const userRole = (session?.user as any)?.role || "EMPLOYEE";
+
+  // Use real notifications from context
+  const { notifications, unreadCount, markAllAsRead, markAsRead, clearAllNotifications } = useNotifications();
 
   // Prevent hydration mismatch
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Mark all notifications as read when dropdown opens
+  const handleNotificationOpen = useCallback(async (open: boolean) => {
+    setIsNotificationOpen(open);
+    if (open && unreadCount > 0) {
+      await markAllAsRead();
+    }
+  }, [unreadCount, markAllAsRead]);
 
   const handleLogout = async () => {
     try {
@@ -120,7 +104,6 @@ export default function Navbar() {
 
   const userName = session?.user?.name || "User";
   const userEmail = session?.user?.email || "";
-  const userRole = (session?.user as any)?.role || "EMPLOYEE";
 
   return (
     <>
@@ -129,7 +112,22 @@ export default function Navbar() {
         <div className="flex h-16 items-center justify-between px-4 md:px-6">
           {/* Left Section - Logo & Branding */}
           <div className="flex items-center gap-4">
-            <Link href={isAdmin ? "/admin" : "/employee"} className="flex items-center gap-3">
+            {/* Mobile Menu */}
+            <Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
+              <SheetTrigger asChild>
+                <Button variant="ghost" size="icon" className="md:hidden">
+                  <Menu className="h-5 w-5" />
+                  <span className="sr-only">Toggle menu</span>
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="left" className="p-0 w-72">
+                <SheetTitle className="sr-only">Navigation Menu</SheetTitle>
+                <SidebarContent onItemClick={() => setIsSheetOpen(false)} />
+              </SheetContent>
+            </Sheet>
+
+            {/* Logo - Hidden on mobile */}
+            <Link href={isAdmin ? "/admin" : "/employee"} className="hidden md:flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-linear-to-br from-blue-600 to-indigo-600 shadow-lg shadow-blue-500/25">
                 <Sparkles className="h-5 w-5 text-white" />
               </div>
@@ -150,7 +148,11 @@ export default function Navbar() {
             <div className="relative w-full">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <div className="w-full h-10 pl-10 pr-4 rounded-xl border border-border bg-muted/50 text-sm flex items-center text-muted-foreground hover:bg-muted transition-colors cursor-pointer">
-                Search anything...
+                {userRole === "ADMIN"
+                  ? "Search employees, attendance, payroll..."
+                  : userRole === "MANAGER"
+                    ? "Search team, attendance..."
+                    : "Search attendance, leave, payroll..."}
               </div>
               <kbd className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none hidden sm:inline-flex h-5 select-none items-center gap-1 rounded border bg-background px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
                 <span className="text-xs">⌘</span>K
@@ -160,99 +162,134 @@ export default function Navbar() {
 
           {/* Right Section - Actions & Profile */}
           <div className="flex items-center gap-2">
-            {/* Mobile Search Button */}
+            {/* Mobile Search Button - Hidden per request */}
             <Button
               variant="ghost"
               size="icon"
-              className="h-9 w-9 rounded-xl lg:hidden"
+              className="hidden h-9 w-9 rounded-xl lg:hidden"
               onClick={() => setCommandOpen(true)}
             >
               <Search className="h-4 w-4" />
             </Button>
 
             {/* Notifications */}
-            <DropdownMenu>
+            <DropdownMenu open={isNotificationOpen} onOpenChange={handleNotificationOpen}>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="relative h-9 w-9 rounded-xl">
                   <Bell className="h-4 w-4" />
-                  {notifications.filter(n => !n.read).length > 0 && (
+                  {unreadCount > 0 && (
                     <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
                   )}
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-80 rounded-xl p-0">
                 <div className="flex items-center justify-between px-4 py-3 border-b">
-                  <h3 className="font-semibold">Notifications</h3>
-                  <Badge variant="secondary" className="text-xs">
-                    {notifications.filter(n => !n.read).length} new
-                  </Badge>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold">Notifications</h3>
+                    <Badge variant="secondary" className="text-xs">
+                      {unreadCount === 0 ? "All read" : `${unreadCount} new`}
+                    </Badge>
+                  </div>
+                  {notifications.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground hover:text-red-500"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        clearAllNotifications();
+                      }}
+                    >
+                      Clear all
+                    </Button>
+                  )}
                 </div>
                 <ScrollArea className="h-80">
                   <div className="p-2">
-                    {notifications.map((notification) => {
-                      const getIcon = () => {
-                        switch (notification.type) {
-                          case "leave_approved":
-                            return <CheckCircle2 className="h-4 w-4 text-green-500" />;
-                          case "leave_rejected":
-                            return <XCircle className="h-4 w-4 text-red-500" />;
-                          case "leave_pending":
-                            return <CalendarOff className="h-4 w-4 text-amber-500" />;
-                          case "payroll":
-                            return <DollarSign className="h-4 w-4 text-blue-500" />;
-                          case "reminder":
-                            return <AlertCircle className="h-4 w-4 text-purple-500" />;
-                          default:
-                            return <Bell className="h-4 w-4 text-muted-foreground" />;
-                        }
-                      };
+                    {notifications.length === 0 ? (
+                      <div className="text-center py-8 text-muted-foreground">
+                        <Bell className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                        <p className="text-sm">No notifications</p>
+                      </div>
+                    ) : (
+                      notifications.map((notification) => {
+                        const getIcon = () => {
+                          switch (notification.type) {
+                            case "SUCCESS":
+                              return <CheckCircle2 className="h-4 w-4 text-green-500" />;
+                            case "ERROR":
+                              return <XCircle className="h-4 w-4 text-red-500" />;
+                            case "WARNING":
+                              return <CalendarOff className="h-4 w-4 text-amber-500" />;
+                            case "INFO":
+                            default:
+                              return <AlertCircle className="h-4 w-4 text-blue-500" />;
+                          }
+                        };
 
-                      const getBgColor = () => {
-                        switch (notification.type) {
-                          case "leave_approved":
-                            return "bg-green-100 dark:bg-green-900/30";
-                          case "leave_rejected":
-                            return "bg-red-100 dark:bg-red-900/30";
-                          case "leave_pending":
-                            return "bg-amber-100 dark:bg-amber-900/30";
-                          case "payroll":
-                            return "bg-blue-100 dark:bg-blue-900/30";
-                          case "reminder":
-                            return "bg-purple-100 dark:bg-purple-900/30";
-                          default:
-                            return "bg-muted";
-                        }
-                      };
+                        const getBgColor = () => {
+                          switch (notification.type) {
+                            case "SUCCESS":
+                              return "bg-green-100 dark:bg-green-900/30";
+                            case "ERROR":
+                              return "bg-red-100 dark:bg-red-900/30";
+                            case "WARNING":
+                              return "bg-amber-100 dark:bg-amber-900/30";
+                            case "INFO":
+                            default:
+                              return "bg-blue-100 dark:bg-blue-900/30";
+                          }
+                        };
 
-                      return (
-                        <div
-                          key={notification.id}
-                          className={cn(
-                            "flex gap-3 p-3 rounded-lg cursor-pointer hover:bg-muted/50 transition-colors",
-                            !notification.read && "bg-muted/30"
-                          )}
-                        >
-                          <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", getBgColor())}>
-                            {getIcon()}
+                        // Format time from createdAt timestamp
+                        const getTimeAgo = (timestamp: string) => {
+                          const now = new Date();
+                          const created = new Date(timestamp);
+                          const diffMs = now.getTime() - created.getTime();
+                          const diffMins = Math.floor(diffMs / 60000);
+                          const diffHours = Math.floor(diffMs / 3600000);
+                          const diffDays = Math.floor(diffMs / 86400000);
+
+                          if (diffMins < 1) return "Just now";
+                          if (diffMins < 60) return `${diffMins} min${diffMins > 1 ? 's' : ''} ago`;
+                          if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+                          return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+                        };
+
+                        return (
+                          <div
+                            key={notification.id}
+                            onClick={() => {
+                              if (!notification.read) {
+                                markAsRead(notification.id);
+                              }
+                            }}
+                            className={cn(
+                              "flex gap-3 p-3 rounded-lg cursor-pointer hover:bg-muted/50 transition-colors",
+                              !notification.read && "bg-muted/30"
+                            )}
+                          >
+                            <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", getBgColor())}>
+                              {getIcon()}
+                            </div>
+                            <div className="flex-1 space-y-1">
+                              <div className="flex items-center gap-2">
+                                <p className={cn("text-sm font-medium leading-none", !notification.read && "font-semibold")}>
+                                  {notification.title}
+                                </p>
+                              </div>
+                              <p className="text-xs text-muted-foreground line-clamp-2">
+                                {notification.message}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                <Clock className="inline h-3 w-3 mr-1" />
+                                {getTimeAgo(notification.createdAt)}
+                              </p>
+                            </div>
                           </div>
-                          <div className="flex-1 space-y-1">
-                            <p className={cn("text-sm font-medium leading-none", !notification.read && "font-semibold")}>
-                              {notification.title}
-                            </p>
-                            <p className="text-xs text-muted-foreground line-clamp-2">
-                              {notification.message}
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                              <Clock className="inline h-3 w-3 mr-1" />
-                              {notification.time}
-                            </p>
-                          </div>
-                          {!notification.read && (
-                            <div className="h-2 w-2 rounded-full bg-blue-500 mt-2" />
-                          )}
-                        </div>
-                      );
-                    })}
+                        );
+                      })
+                    )}
                   </div>
                 </ScrollArea>
                 <div className="border-t p-2">
@@ -320,10 +357,12 @@ export default function Navbar() {
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem className="rounded-lg cursor-pointer">
-                  <User className="mr-2 h-4 w-4" />
-                  <span>Profile</span>
-                </DropdownMenuItem>
+                <Link href={isAdmin ? "/admin/profile" : "/employee/profile"}>
+                  <DropdownMenuItem className="rounded-lg cursor-pointer">
+                    <User className="mr-2 h-4 w-4" />
+                    <span>Profile</span>
+                  </DropdownMenuItem>
+                </Link>
                 <DropdownMenuItem className="rounded-lg cursor-pointer">
                   <Settings className="mr-2 h-4 w-4" />
                   <span>Settings</span>

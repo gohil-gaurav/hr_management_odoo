@@ -3,11 +3,12 @@
 
 generator client {
   provider = "prisma-client-js"
-  output   = "../lib/generated/prisma"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 //////////////////////////////////////////////////
@@ -16,6 +17,7 @@ datasource db {
 
 enum Role {
   ADMIN
+  MANAGER
   EMPLOYEE
 }
 
@@ -47,16 +49,24 @@ model User {
   email               String      @unique
   password            String
   role                Role        @default(EMPLOYEE)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+  
+  // Password reset fields
+  resetToken          String?
+  resetTokenExpiry    DateTime?
+  
+  // Email verification (existing)
   isActive            Boolean     @default(true)
   emailVerified       Boolean     @default(false)
   verificationToken   String?
   verificationTokenExpiry DateTime?
-
+  
+  // Relations
   employee            Employee?
   sessions            Session[]
-
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  notifications       Notification[]
+  sentNotifications   Notification[] @relation("SentBy")
 }
 
 //////////////////////////////////////////////////
@@ -73,15 +83,28 @@ model Employee {
   designation     String
   department      String
   joiningDate     DateTime
+  dateOfBirth     DateTime?  // New: Employee date of birth
   profileImage    String?
+  profileCompleted Boolean   @default(false) // New: Track if profile setup is complete
+  managerId       String?    // Manager relationship (nullable for top-level employees)
 
-  user            User       @relation(fields: [userId], references: [id])
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  manager         Employee?  @relation("ManagerToEmployees", fields: [managerId], references: [id])
+  managedEmployees Employee[] @relation("ManagerToEmployees")
   attendance      Attendance[]
   leaves          LeaveRequest[]
   payroll         Payroll?
+  monthlyAttendance MonthlyAttendance[]
+  yearlyAttendance  YearlyAttendance[]
 
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([department])
+  @@index([designation])
+  @@index([managerId])
+  @@index([fullName]) // Common sort field
 }
 
 //////////////////////////////////////////////////
@@ -95,12 +118,18 @@ model Attendance {
   status      AttendanceStatus
   checkIn     DateTime?
   checkOut    DateTime?
+  workingHours Float?            // Working hours calculated on checkout
 
-  employee    Employee           @relation(fields: [employeeId], references: [id])
+  employee    Employee           @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   createdAt   DateTime           @default(now())
 
   @@unique([employeeId, date])
+  @@index([employeeId])
+  @@index([employeeId, date]) // existing
+  @@index([date, employeeId]) // Optimized for reverse chronological queries
+  @@index([date])
+  @@index([status])
 }
 
 //////////////////////////////////////////////////
@@ -121,10 +150,82 @@ model LeaveRequest {
   approvedAt    DateTime?
   adminComment  String?
 
-  employee      Employee    @relation(fields: [employeeId], references: [id])
+  employee      Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
+
+  @@index([employeeId])
+  @@index([employeeId, createdAt])
+  @@index([employeeId, startDate])
+  @@index([employeeId, endDate])   // Optimized for range overlap checks
+  @@index([status, startDate])     // Optimized for admin dashboard
+  @@index([status])
+  @@index([createdAt])
+}
+
+//////////////////////////////////////////////////
+// MONTHLY ATTENDANCE AGGREGATION
+//////////////////////////////////////////////////
+
+model MonthlyAttendance {
+  id                String   @id @default(uuid())
+  employeeId        String
+  year              Int
+  month             Int      // 1-12
+  
+  totalWorkingDays  Int
+  presentDays       Int
+  absentDays        Int
+  halfDays          Int
+  leaveDays         Int
+  totalWorkingHours Float    @default(0)
+  attendancePercent Float    @default(0)
+  
+  // Day-wise breakdown stored as JSON
+  // Format: [{date: "2026-01-15", status: "PRESENT", hours: 8.5}, ...]
+  dayWiseData       Json?
+  
+  employee          Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@unique([employeeId, year, month])
+  @@index([employeeId])
+  @@index([year, month])
+  @@index([employeeId, year, month])
+}
+
+//////////////////////////////////////////////////
+// YEARLY ATTENDANCE AGGREGATION
+//////////////////////////////////////////////////
+
+model YearlyAttendance {
+  id                   String   @id @default(uuid())
+  employeeId           String
+  year                 Int
+  
+  totalWorkingDays     Int
+  presentDays          Int
+  absentDays           Int
+  halfDays             Int
+  leaveDays            Int
+  totalWorkingHours    Float    @default(0)
+  avgAttendancePercent Float    @default(0)
+  
+  // Month-wise summary stored as JSON
+  // Format: [{month: 1, present: 20, absent: 2, leave: 0, hours: 160}, ...]
+  monthWiseData        Json?
+  
+  employee             Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  
+  @@unique([employeeId, year])
+  @@index([employeeId])
+  @@index([year])
 }
 
 //////////////////////////////////////////////////
@@ -141,10 +242,40 @@ model Payroll {
   deductions    Float
   netSalary     Float
 
-  employee      Employee  @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  employee      Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+}
+
+//////////////////////////////////////////////////
+// NOTIFICATIONS
+//////////////////////////////////////////////////
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String   // INFO, SUCCESS, WARNING, ERROR
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  metadata  Json?    // Additional data (leaveId, employeeId, etc.)
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Sender relation (optional, for system notifications it's null)
+  sentById  String?
+  sentBy    User?    @relation("SentBy", fields: [sentById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([userId, read])
+  @@index([userId, createdAt])
+  @@index([sentById])
 }
 
 //////////////////////////////////////////////////
@@ -152,9 +283,9 @@ model Payroll {
 //////////////////////////////////////////////////
 
 model Session {
-  id           String   @id @default(uuid())
+  sessionToken String   @id
   userId       String
-  expiresAt    DateTime
+  expires      DateTime
 
   user         User     @relation(fields: [userId], references: [id])
 }

@@ -1,21 +1,24 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { useSession } from "next-auth/react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
+import { useCurrentEmployee, useEmployeeOverview, useAttendanceStatus, useCalendarMonth } from "@/lib/hooks";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/hooks/query-keys";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { 
-  CalendarCheck, 
-  CalendarPlus, 
-  User, 
-  Clock, 
+import { useRealtime } from "@/contexts/realtime-context";
+import { NotificationToast } from "@/components/notifications/toast";
+import { AttendanceCalendar } from "@/components/dashboard/attendance-calendar";
+import {
+  CalendarCheck,
+  CalendarPlus,
+  User,
+  Clock,
   CheckCircle2,
-  XCircle,
   AlertCircle,
-  TrendingUp,
   Calendar,
   Bell,
   Loader2
@@ -52,24 +55,18 @@ interface AttendanceStats {
 }
 
 export default function EmployeePage() {
-  const { data: session } = useSession();
+  const { isConnected, connectionFailed } = useRealtime();
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [mounted, setMounted] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [employeeData, setEmployeeData] = useState<EmployeeData | null>(null);
-  const [todayAttendance, setTodayAttendance] = useState<TodayAttendance | null>(null);
-  const [leaveStats, setLeaveStats] = useState<LeaveStats>({
-    pending: 0,
-    approved: 0,
-    rejected: 0,
-    remaining: 0,
-    total: 20,
+  const [calendarYear, setCalendarYear] = useState<number>(() => {
+    const now = new Date();
+    const istNow = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+    return istNow.getUTCFullYear();
   });
-  const [attendanceStats, setAttendanceStats] = useState<AttendanceStats>({
-    present: 0,
-    absent: 0,
-    halfDay: 0,
-    leave: 0,
+  const [calendarMonth, setCalendarMonth] = useState<number>(() => {
+    const now = new Date();
+    const istNow = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+    return istNow.getUTCMonth() + 1;
   });
 
   useEffect(() => {
@@ -79,137 +76,97 @@ export default function EmployeePage() {
     return () => clearInterval(timer);
   }, []);
 
-  // Fetch employee data
-  const fetchEmployeeData = useCallback(async () => {
-    if (!session?.user?.email) return;
+  // ── React Query hooks ─────────────────────────────────
+  const { employeeId } = useCurrentEmployee();
+  const queryClient = useQueryClient();
+  const { data: overviewData, isLoading: overviewLoading } = useEmployeeOverview(employeeId ?? undefined);
 
-    try {
-      const res = await fetch(`/api/employees?email=${session.user.email}`);
-      const data = await res.json();
-      if (data.employee) {
-        setEmployeeData(data.employee);
-        return data.employee.id;
-      }
-    } catch (error) {
-      console.error("Error fetching employee:", error);
-    }
-    return null;
-  }, [session?.user?.email]);
-
-  // Fetch today's attendance
-  const fetchTodayAttendance = useCallback(async (employeeId: string) => {
-    try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      const res = await fetch(
-        `/api/attendance?employeeId=${employeeId}&startDate=${today.toISOString()}&endDate=${tomorrow.toISOString()}`
-      );
-      const data = await res.json();
-      
-      if (data.attendanceRecords && data.attendanceRecords.length > 0) {
-        const todayRecord = data.attendanceRecords[0];
-        setTodayAttendance({
-          status: todayRecord.status?.toLowerCase() || "not-marked",
-          checkIn: todayRecord.checkIn ? new Date(todayRecord.checkIn).toLocaleTimeString('en-US', { 
-            hour: '2-digit', 
-            minute: '2-digit',
-            hour12: true 
-          }) : null,
-          checkOut: todayRecord.checkOut ? new Date(todayRecord.checkOut).toLocaleTimeString('en-US', { 
-            hour: '2-digit', 
-            minute: '2-digit',
-            hour12: true 
-          }) : null,
-        });
-      } else {
-        setTodayAttendance({
-          status: "not-marked",
-          checkIn: null,
-          checkOut: null,
-        });
-      }
-    } catch (error) {
-      console.error("Error fetching today's attendance:", error);
-    }
+  // Today's date in IST for status lookup
+  const todayDate = useMemo(() => {
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const now = new Date();
+    const istNow = new Date(now.getTime() + IST_OFFSET_MS);
+    return `${istNow.getUTCFullYear()}-${String(istNow.getUTCMonth() + 1).padStart(2, '0')}-${String(istNow.getUTCDate()).padStart(2, '0')}`;
   }, []);
 
-  // Fetch leave stats
-  const fetchLeaveStats = useCallback(async (employeeId: string) => {
-    try {
-      const res = await fetch(`/api/leave?employeeId=${employeeId}`);
-      const data = await res.json();
-      
-      if (data.leaveRequests) {
-        const pending = data.leaveRequests.filter((lr: any) => lr.status === "PENDING").length;
-        const approved = data.leaveRequests.filter((lr: any) => lr.status === "APPROVED").length;
-        const rejected = data.leaveRequests.filter((lr: any) => lr.status === "REJECTED").length;
-        const totalDays = data.leaveRequests
-          .filter((lr: any) => lr.status === "APPROVED")
-          .reduce((sum: number, lr: any) => sum + (lr.days || 0), 0);
+  const { data: statusData } = useAttendanceStatus(employeeId ?? undefined, todayDate);
+  const { data: calendarData } = useCalendarMonth(employeeId, calendarYear, calendarMonth);
 
-        setLeaveStats({
-          pending,
-          approved,
-          rejected,
-          remaining: 20 - totalDays,
-          total: 20,
-        });
+  // ── Derived state ─────────────────────────────────────
+  const loading = overviewLoading;
+  const employeeData = overviewData?.profile ?? null;
+
+  const todayAttendance = useMemo<TodayAttendance | null>(() => {
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const todayRecords = overviewData?.attendance || [];
+    const todayRecord = todayRecords.find((a: any) => a.date.startsWith(todayDate));
+    let status = statusData?.status?.toLowerCase() || (todayRecord ? "not-marked" : "absent");
+
+    if (!todayRecord) {
+      const onLeave = overviewData?.leaves?.find((l: any) => {
+        if (l.status !== "APPROVED") return false;
+        const start = new Date(l.startDate);
+        const end = new Date(l.endDate);
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+        return now >= new Date(start.setHours(0, 0, 0, 0)) && now <= new Date(end.setHours(23, 59, 59, 999));
+      });
+      if (onLeave && status !== "on_leave") {
+        return { status: "leave", checkIn: null, checkOut: null };
       }
-    } catch (error) {
-      console.error("Error fetching leave stats:", error);
     }
-  }, []);
 
-  // Fetch monthly attendance stats
-  const fetchMonthlyAttendance = useCallback(async (employeeId: string) => {
-    try {
-      const today = new Date();
-      const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-      const lastDayOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-
-      const res = await fetch(
-        `/api/attendance?employeeId=${employeeId}&startDate=${firstDayOfMonth.toISOString()}&endDate=${lastDayOfMonth.toISOString()}`
-      );
-      const data = await res.json();
-      
-      if (data.attendanceRecords) {
-        const stats: AttendanceStats = {
-          present: data.attendanceRecords.filter((a: any) => a.status === "PRESENT").length,
-          absent: data.attendanceRecords.filter((a: any) => a.status === "ABSENT").length,
-          halfDay: data.attendanceRecords.filter((a: any) => a.status === "HALF_DAY").length,
-          leave: data.attendanceRecords.filter((a: any) => a.status === "LEAVE").length,
-        };
-        setAttendanceStats(stats);
-      }
-    } catch (error) {
-      console.error("Error fetching monthly attendance:", error);
-    }
-  }, []);
-
-  // Load all data
-  useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      const employeeId = await fetchEmployeeData();
-      if (employeeId) {
-        await Promise.all([
-          fetchTodayAttendance(employeeId),
-          fetchLeaveStats(employeeId),
-          fetchMonthlyAttendance(employeeId),
-        ]);
-      }
-      setLoading(false);
+    return {
+      status,
+      checkIn: todayRecord?.checkIn
+        ? new Date(new Date(todayRecord.checkIn).getTime() + IST_OFFSET_MS).toLocaleTimeString('en-IN', {
+            hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC'
+          })
+        : null,
+      checkOut: todayRecord?.checkOut
+        ? new Date(new Date(todayRecord.checkOut).getTime() + IST_OFFSET_MS).toLocaleTimeString('en-IN', {
+            hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC'
+          })
+        : null,
     };
-    loadData();
-  }, [fetchEmployeeData, fetchTodayAttendance, fetchLeaveStats, fetchMonthlyAttendance]);
+  }, [overviewData?.attendance, overviewData?.leaves, statusData, todayDate]);
+
+  const leaveStats = useMemo<LeaveStats>(() => {
+    if (!overviewData?.leaves) return { pending: 0, approved: 0, rejected: 0, remaining: 0, total: 0 };
+    const leaves = overviewData.leaves;
+    const approvedCount = leaves.filter((l: any) => l.status === "APPROVED").length;
+    return {
+      pending: leaves.filter((l: any) => l.status === "PENDING").length,
+      approved: approvedCount,
+      rejected: leaves.filter((l: any) => l.status === "REJECTED").length,
+      remaining: 0,
+      total: approvedCount,
+    };
+  }, [overviewData?.leaves]);
+
+  const monthlyAttendance = calendarData || [];
+
+  const attendanceStats = useMemo<AttendanceStats>(() => {
+    const records = calendarData || [];
+    return {
+      present: records.filter((a: any) => a.status === "present").length,
+      absent: records.filter((a: any) => a.status === "absent").length,
+      halfDay: records.filter((a: any) => a.status === "half-day").length,
+      leave: 0,
+    };
+  }, [calendarData]);
+
+  const handleCalendarMonthChange = useCallback((year: number, month: number) => {
+    setCalendarYear(year);
+    setCalendarMonth(month);
+  }, []);
 
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "present":
         return <Badge className="bg-green-500">Present</Badge>;
+      case "late":
+        return <Badge className="bg-amber-500">Present (Late)</Badge>;
       case "absent":
         return <Badge variant="destructive">Absent</Badge>;
       case "half-day":
@@ -231,12 +188,31 @@ export default function EmployeePage() {
 
   return (
     <div className="space-y-6">
+      <NotificationToast />
+      {/* Real-time connection indicator */}
+      {mounted && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <div className={`h-2 w-2 rounded-full ${isConnected
+            ? "bg-green-500 animate-pulse"
+            : connectionFailed
+              ? "bg-gray-400"
+              : "bg-yellow-500 animate-pulse"
+            }`} />
+          <span>
+            {isConnected
+              ? "Real-time connected"
+              : connectionFailed
+                ? "Real-time not available"
+                : "Connecting..."}
+          </span>
+        </div>
+      )}
       {/* Welcome Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between bg-linear-to-r from-blue-500 to-blue-600 rounded-2xl p-6 text-white">
         <div className="flex items-center gap-4">
           <Avatar className="h-16 w-16 border-2 border-white/30">
             <AvatarFallback className="bg-white/20 text-white text-xl">
-              {employeeData.fullName.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2)}
+              {employeeData.fullName.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2)}
             </AvatarFallback>
           </Avatar>
           <div>
@@ -249,7 +225,7 @@ export default function EmployeePage() {
             {mounted && currentTime ? currentTime.toLocaleTimeString() : "--:--:--"}
           </p>
           <p className="text-blue-100">
-            {mounted && currentTime 
+            {mounted && currentTime
               ? currentTime.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
               : "Loading..."}
           </p>
@@ -289,12 +265,12 @@ export default function EmployeePage() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Leaves Remaining</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Leaves Used</CardTitle>
             <Calendar className="h-4 w-4 text-blue-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold">{leaveStats.remaining}</div>
-            <p className="text-xs text-muted-foreground">Out of {leaveStats.total} days</p>
+            <div className="text-3xl font-bold">{leaveStats.total}</div>
+            <p className="text-xs text-muted-foreground">Approved this year</p>
           </CardContent>
         </Card>
 
@@ -310,7 +286,6 @@ export default function EmployeePage() {
         </Card>
       </div>
 
-      {/* Quick Actions & Notifications */}
       <div className="grid gap-6 md:grid-cols-2">
         {/* Quick Actions */}
         <Card>
@@ -385,33 +360,41 @@ export default function EmployeePage() {
         </Card>
       </div>
 
-      {/* Attendance Summary */}
-      <Card>
-        <CardHeader>
-          <CardTitle>This Month&apos;s Attendance</CardTitle>
-          <CardDescription>Your attendance summary for January 2026</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="text-center p-4 bg-green-50 dark:bg-green-950/30 rounded-lg">
-              <div className="text-2xl font-bold text-green-600">{attendanceStats.present}</div>
-              <p className="text-sm text-green-600">Present</p>
-            </div>
-            <div className="text-center p-4 bg-red-50 dark:bg-red-950/30 rounded-lg">
-              <div className="text-2xl font-bold text-red-600">{attendanceStats.absent}</div>
-              <p className="text-sm text-red-600">Absent</p>
-            </div>
-            <div className="text-center p-4 bg-amber-50 dark:bg-amber-950/30 rounded-lg">
-              <div className="text-2xl font-bold text-amber-600">{attendanceStats.halfDay}</div>
-              <p className="text-sm text-amber-600">Half Day</p>
-            </div>
-            <div className="text-center p-4 bg-blue-50 dark:bg-blue-950/30 rounded-lg">
-              <div className="text-2xl font-bold text-blue-600">{attendanceStats.leave}</div>
-              <p className="text-sm text-blue-600">On Leave</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {/* Monthly Attendance Calendar */}
+      <div className="grid gap-6 md:grid-cols-3">
+        <div className="md:col-span-2">
+          <AttendanceCalendar attendanceData={monthlyAttendance} onMonthChange={handleCalendarMonthChange} />
+        </div>
+        <div>
+          {/* Attendance Stats Summary */}
+          <Card className="h-full">
+            <CardHeader>
+              <CardTitle>This Month</CardTitle>
+              <CardDescription>Summary</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between p-3 bg-green-50 dark:bg-green-950/30 rounded-lg">
+                <span className="text-sm font-medium">Present</span>
+                <span className="text-xl font-bold text-green-600">{attendanceStats.present}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-950/30 rounded-lg">
+                <span className="text-sm font-medium">Absent</span>
+                <span className="text-xl font-bold text-red-600">{attendanceStats.absent}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-amber-50 dark:bg-amber-950/30 rounded-lg">
+                <span className="text-sm font-medium">Half Day</span>
+                <span className="text-xl font-bold text-amber-600">{attendanceStats.halfDay}</span>
+              </div>
+              {/* 
+                    <div className="flex items-center justify-between p-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg">
+                        <span className="text-sm font-medium">On Leave</span>
+                        <span className="text-xl font-bold text-blue-600">{attendanceStats.leave}</span>
+                    </div>
+                    */}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

@@ -6,17 +6,18 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { usePendingLeavesCount } from "@/lib/hooks";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { 
-  LayoutDashboard, 
-  Users, 
-  CalendarCheck, 
-  CalendarOff, 
+import {
+  LayoutDashboard,
+  Users,
+  CalendarCheck,
+  CalendarOff,
   DollarSign,
   User,
   Menu,
@@ -36,11 +37,18 @@ interface NavGroup {
   items: NavItem[];
 }
 
-export default function Sidebar() {
+// Reusable content component for both Desktop Sidebar and Mobile Sheet
+export function SidebarContent({
+  isCollapsed = false,
+  onItemClick
+}: {
+  isCollapsed?: boolean;
+  onItemClick?: () => void;
+}) {
   const pathname = usePathname();
   const isAdmin = pathname?.startsWith("/admin");
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [pendingLeavesCount, setPendingLeavesCount] = useState(0);
+  const isManager = pathname?.startsWith("/manager");
+  const { data: pendingLeavesCount = 0 } = usePendingLeavesCount();
   const [mounted, setMounted] = useState(false);
 
   const adminGroups: NavGroup[] = [
@@ -61,28 +69,27 @@ export default function Sidebar() {
     },
   ];
 
-  // Fetch pending leaves count
-  useEffect(() => {
-    setMounted(true);
-    const fetchPendingLeaves = async () => {
-      if (!isAdmin) return;
-      
-      try {
-        const res = await fetch("/api/leave?status=PENDING");
-        const data = await res.json();
-        if (data.leaveRequests) {
-          setPendingLeavesCount(data.leaveRequests.length);
-        }
-      } catch (error) {
-        console.error("Error fetching pending leaves:", error);
-      }
-    };
-
-    fetchPendingLeaves();
-    // Refresh every 30 seconds
-    const interval = setInterval(fetchPendingLeaves, 30000);
-    return () => clearInterval(interval);
-  }, [isAdmin]);
+  const managerGroups: NavGroup[] = [
+    {
+      title: "Overview",
+      items: [
+        { href: "/manager", label: "Dashboard", icon: LayoutDashboard },
+      ],
+    },
+    {
+      title: "Team Management",
+      items: [
+        { href: "/manager/team", label: "My Team", icon: Users },
+        { href: "/manager/attendance", label: "Team Attendance", icon: CalendarCheck },
+      ],
+    },
+    {
+      title: "My Profile",
+      items: [
+        { href: "/manager/profile", label: "Profile", icon: User },
+      ],
+    },
+  ];
 
   const employeeGroups: NavGroup[] = [
     {
@@ -102,7 +109,11 @@ export default function Sidebar() {
     },
   ];
 
-  const groups = isAdmin ? adminGroups : employeeGroups;
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const groups = isAdmin ? adminGroups : isManager ? managerGroups : employeeGroups;
 
   const NavItemComponent = ({ item }: { item: NavItem }) => {
     const isActive = pathname === item.href;
@@ -111,6 +122,7 @@ export default function Sidebar() {
     const content = (
       <Link
         href={item.href}
+        onClick={onItemClick}
         className={cn(
           "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
           isActive
@@ -133,10 +145,10 @@ export default function Sidebar() {
             )}
           />
         </div>
-        {!isCollapsed && (
+        {(!isCollapsed || !mounted) && (
           <>
             <span className="flex-1">{item.label}</span>
-            {item.badge && (
+            {item.badge ? (
               <span
                 className={cn(
                   "flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-xs font-semibold",
@@ -147,13 +159,13 @@ export default function Sidebar() {
               >
                 {item.badge}
               </span>
-            )}
+            ) : null}
           </>
         )}
       </Link>
     );
 
-    if (isCollapsed) {
+    if (mounted && isCollapsed) {
       return (
         <TooltipProvider delayDuration={0}>
           <Tooltip>
@@ -175,16 +187,60 @@ export default function Sidebar() {
   };
 
   return (
+    <div className="flex flex-col h-full bg-background">
+      <ScrollArea className="flex-1 px-3 py-4">
+        <nav className="space-y-6">
+          {groups.map((group, index) => (
+            <div key={group.title}>
+              {(!isCollapsed || !mounted) && (
+                <h4 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  {group.title}
+                </h4>
+              )}
+              {mounted && isCollapsed && index > 0 && (
+                <Separator className="my-4" />
+              )}
+              <div className="space-y-1">
+                {group.items.map((item) => (
+                  <NavItemComponent key={item.href} item={item} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </nav>
+      </ScrollArea>
+      {/* Footer */}
+      <div className="border-t p-3 text-center">
+        {(!isCollapsed || !mounted) && (
+          <div className="rounded-xl bg-linear-to-r from-blue-50 to-indigo-50 dark:from-blue-950 dark:to-indigo-950 p-3">
+            <p className="text-xs font-medium text-blue-900 dark:text-blue-100">DayFlow HRMS</p>
+            <p className="text-[10px] text-blue-600 dark:text-blue-400">Version 1.0.0</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function Sidebar() {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  return (
     <aside
       className={cn(
-        "relative flex flex-col border-r bg-background transition-all duration-300 ease-in-out",
+        "relative hidden md:flex flex-col border-r bg-background transition-all duration-300 ease-in-out",
         mounted && isCollapsed ? "w-18" : "w-64"
       )}
     >
       {/* Toggle Button */}
-      <div className="flex items-center justify-between px-3 py-4 border-b">
+      <div className="flex items-center justify-between px-3 py-4 border-b h-16">
         {mounted && !isCollapsed && (
-          <span className="text-sm font-semibold text-foreground">Menu</span>
+          <span className="text-sm font-semibold text-foreground px-2">Menu</span>
         )}
         {mounted && (
           <button
@@ -203,38 +259,7 @@ export default function Sidebar() {
         )}
       </div>
 
-      {/* Navigation */}
-      <ScrollArea className="flex-1 px-3 py-4">
-        <nav className="space-y-6">
-          {groups.map((group, index) => (
-            <div key={group.title}>
-              {mounted && !isCollapsed && (
-                <h4 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  {group.title}
-                </h4>
-              )}
-              {isCollapsed && index > 0 && (
-                <Separator className="my-4" />
-              )}
-              <div className="space-y-1">
-                {group.items.map((item) => (
-                  <NavItemComponent key={item.href} item={item} />
-                ))}
-              </div>
-            </div>
-          ))}
-        </nav>
-      </ScrollArea>
-
-      {/* Footer */}
-      <div className="border-t p-3">
-        {!isCollapsed && (
-          <div className="rounded-xl bg-linear-to-r from-blue-50 to-indigo-50 dark:from-blue-950 dark:to-indigo-950 p-3">
-            <p className="text-xs font-medium text-blue-900 dark:text-blue-100">DayFlow HRMS</p>
-            <p className="text-[10px] text-blue-600 dark:text-blue-400">Version 1.0.0</p>
-          </div>
-        )}
-      </div>
+      <SidebarContent isCollapsed={isCollapsed} />
     </aside>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,17 +13,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { 
-  Clock, 
-  Users, 
-  UserCheck, 
-  UserX, 
+import {
+  Clock,
+  Users,
+  UserCheck,
+  UserX,
   Calendar,
   Search,
   RefreshCw,
   Download,
-  AlertCircle
+  AlertCircle,
+  MoreVertical
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { useAdminAttendanceData } from "@/lib/hooks";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/hooks/query-keys";
 
 interface AttendanceData {
   id: string;
@@ -34,18 +44,23 @@ interface AttendanceData {
   checkOut: string | null;
   status: string;
   workHours: string;
+  role: string;
 }
 
 const getStatusBadge = (status: string) => {
   switch (status) {
     case "present":
+    case "half-day":
       return <Badge className="bg-green-500 hover:bg-green-600">Present</Badge>;
     case "absent":
       return <Badge variant="destructive">Absent</Badge>;
     case "late":
       return <Badge className="bg-amber-500 hover:bg-amber-600">Late</Badge>;
     case "leave":
+    case "on-leave":
       return <Badge className="bg-blue-500 hover:bg-blue-600">On Leave</Badge>;
+    case "holiday":
+      return <Badge className="bg-purple-500 hover:bg-purple-600">Holiday</Badge>;
     default:
       return <Badge variant="secondary">-</Badge>;
   }
@@ -57,120 +72,87 @@ export default function AdminAttendancePage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [departmentFilter, setDepartmentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
+  // ⚡ React Query — data is cached & shared across navigation
+  const { data: rawAttendanceData, isLoading: loading, isRefreshing } = useAdminAttendanceData();
+  const attendanceData: AttendanceData[] = rawAttendanceData || [];
+
+  useState(() => {
     setMounted(true);
     setCurrentTime(new Date());
-    const timer = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    fetchAttendanceData();
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
-  }, []);
-
-  const fetchAttendanceData = async () => {
-    setIsRefreshing(true);
-    setLoading(true);
-    try {
-      // Get all employees first
-      const employeesRes = await fetch("/api/employees");
-      const employeesData = await employeesRes.json();
-      const employees = employeesData.employees || [];
-
-      // Get today's attendance for all employees
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      const attendanceRes = await fetch(
-        `/api/attendance?startDate=${today.toISOString()}&endDate=${tomorrow.toISOString()}`
-      );
-      const attendanceData = await attendanceRes.json();
-      const todayRecords = attendanceData.attendanceRecords || [];
-
-      // Create a map of employee attendance
-      const attendanceMap = new Map();
-      todayRecords.forEach((record: any) => {
-        attendanceMap.set(record.employeeId, record);
-      });
-
-      // Combine employee data with attendance records
-      const combinedData = employees.map((emp: any) => {
-        const record = attendanceMap.get(emp.id);
-        const checkIn = record?.checkIn ? new Date(record.checkIn).toLocaleTimeString('en-US', { 
-          hour: '2-digit', 
-          minute: '2-digit',
-          hour12: true 
-        }) : null;
-        const checkOut = record?.checkOut ? new Date(record.checkOut).toLocaleTimeString('en-US', { 
-          hour: '2-digit', 
-          minute: '2-digit',
-          hour12: true 
-        }) : null;
-
-        let workHours = "-";
-        if (checkIn && checkOut) {
-          const checkInTime = new Date(record.checkIn);
-          const checkOutTime = new Date(record.checkOut);
-          const diff = checkOutTime.getTime() - checkInTime.getTime();
-          const h = Math.floor(diff / (1000 * 60 * 60));
-          const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-          workHours = `${h}h ${m}m`;
-        } else if (checkIn) {
-          workHours = "Working...";
-        }
-
-        let status = "absent";
-        if (record) {
-          status = record.status?.toLowerCase().replace('_', '-') || "absent";
-        }
-
-        return {
-          id: emp.id,
-          name: emp.fullName,
-          email: emp.user?.email || "",
-          department: emp.department,
-          checkIn,
-          checkOut,
-          status,
-          workHours,
-        };
-      });
-
-      setAttendanceData(combinedData);
-    } catch (error) {
-      console.error("Error fetching attendance:", error);
-    } finally {
-      setIsRefreshing(false);
-      setLoading(false);
-    }
-  };
-
-  // Calculate stats
-  const totalEmployees = attendanceData.length;
-  const presentCount = attendanceData.filter(e => e.status === "present" || e.status === "late").length;
-  const absentCount = attendanceData.filter(e => e.status === "absent").length;
-  const leaveCount = attendanceData.filter(e => e.status === "leave").length;
-  const lateCount = attendanceData.filter(e => e.status === "late").length;
-  const attendanceRate = ((presentCount / totalEmployees) * 100).toFixed(1);
-
-  // Filter data
-  const filteredData = attendanceData.filter(employee => {
-    const matchesSearch = employee.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         employee.email.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesDepartment = departmentFilter === "all" || employee.department === departmentFilter;
-    const matchesStatus = statusFilter === "all" || employee.status === statusFilter;
-    return matchesSearch && matchesDepartment && matchesStatus;
   });
 
-  const departments = [...new Set(attendanceData.map(e => e.department))];
+  // Filter to employees only (managers don't have attendance)
+  const employeeAttendance = useMemo(() =>
+    attendanceData.filter((e: AttendanceData) => e.role === "EMPLOYEE"),
+    [attendanceData]
+  );
+
+  // Calculate stats (memoized)
+  const { totalEmployees, presentCount, absentCount, leaveCount, lateCount, attendanceRate } = useMemo(() => {
+    const total = employeeAttendance.length;
+    const present = employeeAttendance.filter((e: AttendanceData) => e.status === "present" || e.status === "late").length;
+    const absent = employeeAttendance.filter((e: AttendanceData) => e.status === "absent").length;
+    const leave = employeeAttendance.filter((e: AttendanceData) => e.status === "leave").length;
+    const late = employeeAttendance.filter((e: AttendanceData) => e.status === "late").length;
+    const rate = total > 0 ? ((present / total) * 100).toFixed(1) : "0.0";
+    return { totalEmployees: total, presentCount: present, absentCount: absent, leaveCount: leave, lateCount: late, attendanceRate: rate };
+  }, [employeeAttendance]);
+
+  // Filter data (memoized)
+  const filteredData = useMemo(() =>
+    employeeAttendance.filter((employee: AttendanceData) => {
+      const matchesSearch = employee.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        employee.email.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesDepartment = departmentFilter === "all" || employee.department === departmentFilter;
+      const matchesStatus = statusFilter === "all" || employee.status === statusFilter;
+      return matchesSearch && matchesDepartment && matchesStatus;
+    }),
+    [employeeAttendance, searchQuery, departmentFilter, statusFilter]
+  );
+
+  const departments = useMemo(() => [...new Set(employeeAttendance.map((e: AttendanceData) => e.department))] as string[], [employeeAttendance]);
 
   const handleRefresh = () => {
-    fetchAttendanceData();
+    queryClient.invalidateQueries({ queryKey: queryKeys.employees.all });
+    queryClient.invalidateQueries({ queryKey: queryKeys.attendance.all });
+  };
+
+  const handleExport = () => {
+    // Create CSV content
+    const headers = ["Employee Name", "Email", "Department", "Date", "Check In", "Check Out", "Work Hours", "Status"];
+    const todayStr = new Date().toLocaleDateString('en-US');
+
+    const rows = filteredData.map((emp: AttendanceData) => [
+      emp.name,
+      emp.email,
+      emp.department,
+      todayStr,
+      emp.checkIn || "-",
+      emp.checkOut || "-",
+      emp.workHours,
+      emp.status
+    ]);
+
+    // Create CSV string
+    const csvContent = [
+      headers.join(","),
+      ...rows.map((row: string[]) => row.map((cell: string) => `"${cell}"`).join(","))
+    ].join("\n");
+
+    // Create and download file
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `attendance_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -183,19 +165,44 @@ export default function AdminAttendancePage() {
         </div>
         <div className="flex items-center gap-2">
           {mounted && currentTime && (
-            <Badge variant="outline" className="font-mono text-lg px-4 py-2">
+            <Badge variant="outline" className="hidden md:flex font-mono text-lg px-4 py-2">
               <Clock className="h-4 w-4 mr-2 animate-pulse" />
               {currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
             </Badge>
           )}
-          <Button variant="outline" onClick={handleRefresh} disabled={isRefreshing}>
-            <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
-          <Button variant="outline">
-            <Download className="h-4 w-4 mr-2" />
-            Export
-          </Button>
+
+          {/* Desktop Actions */}
+          <div className="hidden md:flex items-center gap-2">
+            <Button variant="outline" onClick={handleRefresh} disabled={isRefreshing}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
+              Refresh
+            </Button>
+            <Button variant="outline" onClick={handleExport}>
+              <Download className="h-4 w-4 mr-2" />
+              Export
+            </Button>
+          </div>
+
+          {/* Mobile Actions Menu */}
+          <div className="md:hidden">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="icon">
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={handleRefresh} disabled={isRefreshing}>
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Refresh
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={handleExport}>
+                  <Download className="h-4 w-4 mr-2" />
+                  Export Data
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </div>
 
@@ -294,68 +301,133 @@ export default function AdminAttendancePage() {
             </Select>
           </div>
 
-          {/* Table */}
-          <div className="rounded-lg border">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b bg-muted/50">
-                    <th className="text-left p-4 font-medium">Employee</th>
-                    <th className="text-left p-4 font-medium">Department</th>
-                    <th className="text-left p-4 font-medium">Check In</th>
-                    <th className="text-left p-4 font-medium">Check Out</th>
-                    <th className="text-left p-4 font-medium">Work Hours</th>
-                    <th className="text-left p-4 font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredData.map((employee) => (
-                    <tr key={employee.id} className="border-b hover:bg-muted/30 transition-colors">
-                      <td className="p-4">
+          {/* Mobile Card View */}
+          <div className="md:hidden space-y-4">
+                {filteredData.map((employee) => (
+                  <div key={employee.id} className="bg-card rounded-xl border shadow-sm overflow-hidden">
+                    <div className="p-4">
+                      <div className="flex justify-between items-start mb-4">
                         <div className="flex items-center gap-3">
-                          <Avatar className="h-9 w-9">
-                            <AvatarFallback className="bg-primary/10 text-primary text-sm">
-                              {employee.name.split(" ").map(n => n[0]).join("")}
+                          <Avatar className="h-10 w-10 border border-border/50">
+                            <AvatarFallback className="bg-primary/5 text-primary text-xs font-bold">
+                              {employee.name.split(" ").map((n: string) => n[0]).join("")}
                             </AvatarFallback>
                           </Avatar>
                           <div>
-                            <p className="font-medium">{employee.name}</p>
-                            <p className="text-xs text-muted-foreground">{employee.email}</p>
+                            <p className="font-bold text-sm">{employee.name}</p>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <Badge variant="outline" className="text-[10px] px-1.5 h-4 font-normal text-muted-foreground border-border">
+                                {employee.department}
+                              </Badge>
+                            </div>
                           </div>
                         </div>
-                      </td>
-                      <td className="p-4">
-                        <Badge variant="outline">{employee.department}</Badge>
-                      </td>
-                      <td className="p-4">
-                        <span className={employee.checkIn ? "text-green-600 font-medium" : "text-muted-foreground"}>
-                          {employee.checkIn || "-"}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        <span className={employee.checkOut ? "text-red-600 font-medium" : "text-muted-foreground"}>
-                          {employee.checkOut || (employee.checkIn ? "Working" : "-")}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        <span className={employee.workHours === "Working..." ? "text-green-600 font-medium animate-pulse" : ""}>
-                          {employee.workHours}
-                        </span>
-                      </td>
-                      <td className="p-4">
                         {getStatusBadge(employee.status)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {filteredData.length === 0 && (
-              <div className="text-center py-8 text-muted-foreground">
-                No employees found matching your filters
+                      </div>
+                      <div className="bg-muted/30 rounded-lg p-3 grid grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider font-semibold">
+                            <div className="h-1.5 w-1.5 rounded-full bg-green-500"></div>
+                            Check In
+                          </div>
+                          <div className="font-mono text-lg font-medium tracking-tight">
+                            {employee.checkIn || <span className="text-muted-foreground/40">--:--</span>}
+                          </div>
+                        </div>
+                        <div className="space-y-1 text-right">
+                          <div className="flex items-center justify-end gap-1.5 text-xs text-muted-foreground uppercase tracking-wider font-semibold">
+                            Check Out
+                            <div className={`h-1.5 w-1.5 rounded-full ${employee.checkOut ? "bg-red-500" : "bg-gray-300"}`}></div>
+                          </div>
+                          <div className="font-mono text-lg font-medium tracking-tight">
+                            {employee.checkOut || (employee.checkIn ? <span className="text-amber-600 dark:text-amber-500 text-sm font-sans animate-pulse">Working</span> : <span className="text-muted-foreground/40">--:--</span>)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-3 pt-3 border-t border-dashed">
+                        <div className="text-xs text-muted-foreground">
+                          {new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground uppercase tracking-wide">Total Hours</span>
+                          <Badge variant="secondary" className={`font-mono ${employee.workHours === "Working..." ? "bg-amber-100 text-amber-700 animate-pulse" : "bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"}`}>
+                            {employee.workHours}
+                          </Badge>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {filteredData.length === 0 && (
+                  <div className="text-center py-10 px-4 border-2 border-dashed rounded-xl bg-muted/20">
+                    <Users className="h-10 w-10 mx-auto mb-3 text-muted-foreground/40" />
+                    <p className="text-muted-foreground font-medium">No active records found</p>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+
+              {/* Desktop Table */}
+              <div className="hidden md:block rounded-lg border">
+                <div className="overflow-x-auto w-full">
+                  <table className="w-full whitespace-nowrap">
+                    <thead>
+                      <tr className="border-b bg-muted/50">
+                        <th className="text-left p-4 font-medium">Employee</th>
+                        <th className="text-left p-4 font-medium">Department</th>
+                        <th className="text-left p-4 font-medium">Check In</th>
+                        <th className="text-left p-4 font-medium">Check Out</th>
+                        <th className="text-left p-4 font-medium">Work Hours</th>
+                        <th className="text-left p-4 font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredData.map((employee) => (
+                        <tr key={employee.id} className="border-b hover:bg-muted/30 transition-colors">
+                          <td className="p-4">
+                            <div className="flex items-center gap-3">
+                              <Avatar className="h-9 w-9">
+                                <AvatarFallback className="bg-primary/10 text-primary text-sm">
+                                  {employee.name.split(" ").map((n: string) => n[0]).join("")}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div>
+                                <p className="font-medium">{employee.name}</p>
+                                <p className="text-xs text-muted-foreground">{employee.email}</p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <Badge variant="outline">{employee.department}</Badge>
+                          </td>
+                          <td className="p-4">
+                            <span className={employee.checkIn ? "text-green-600 font-medium" : "text-muted-foreground"}>
+                              {employee.checkIn || "-"}
+                            </span>
+                          </td>
+                          <td className="p-4">
+                            <span className={employee.checkOut ? "text-red-600 font-medium" : "text-muted-foreground"}>
+                              {employee.checkOut || (employee.checkIn ? "Working" : "-")}
+                            </span>
+                          </td>
+                          <td className="p-4">
+                            <span className={employee.workHours === "Working..." ? "text-green-600 font-medium animate-pulse" : ""}>
+                              {employee.workHours}
+                            </span>
+                          </td>
+                          <td className="p-4">
+                            {getStatusBadge(employee.status)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {filteredData.length === 0 && (
+                  <div className="text-center py-8 text-muted-foreground">
+                    No employees found matching your filters
+                  </div>
+                )}
+              </div>
         </CardContent>
       </Card>
     </div>

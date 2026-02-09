@@ -1,40 +1,71 @@
-"use client";
+"use client"
 
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts"
 
-const data = [
-  { name: "Present", value: 142, color: "#10b981" },
-  { name: "Absent", value: 5, color: "#ef4444" },
-  { name: "On Leave", value: 8, color: "#f59e0b" },
-  { name: "Remote", value: 15, color: "#3b82f6" },
-];
+interface AttendancePieChartProps {
+  data: {
+    present: number
+    absent: number
+    late: number
+    leave: number
+  }
+}
 
-export function AttendancePieChart() {
+export function AttendancePieChart({ data }: AttendancePieChartProps) {
+  // Add default values to prevent undefined errors
+  const safeData = {
+    present: data?.present || 0,
+    absent: data?.absent || 0,
+    late: data?.late || 0,
+    leave: data?.leave || 0
+  };
+
+  const chartData = [
+    { name: "Present", value: safeData.present, color: "#22c55e" }, // green-500
+    { name: "Late", value: safeData.late, color: "#f59e0b" },      // amber-500
+    { name: "Absent", value: safeData.absent, color: "#ef4444" },   // red-500
+    { name: "On Leave", value: safeData.leave, color: "#3b82f6" },  // blue-500
+  ].filter(item => item.value > 0)
+
+  if (chartData.length === 0) {
+    return (
+      <div className="flex h-[300px] items-center justify-center text-muted-foreground">
+        No attendance data today
+      </div>
+    )
+  }
+
   return (
     <ResponsiveContainer width="100%" height={300}>
       <PieChart>
         <Pie
-          data={data}
+          data={chartData}
           cx="50%"
           cy="50%"
           innerRadius={60}
-          outerRadius={100}
+          outerRadius={80}
           paddingAngle={5}
           dataKey="value"
         >
-          {data.map((entry, index) => (
+          {chartData.map((entry, index) => (
             <Cell key={`cell-${index}`} fill={entry.color} />
           ))}
         </Pie>
         <Tooltip
           contentStyle={{
-            backgroundColor: "hsl(var(--background))",
-            border: "1px solid hsl(var(--border))",
-            borderRadius: "8px",
+            backgroundColor: "rgba(255, 255, 255, 0.9)",
+            border: "1px solid rgba(0, 0, 0, 0.1)",
+            borderRadius: "6px",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
+            color: "#000000",
+            padding: "8px"
           }}
+          formatter={(value: any) => [`${value} ${value === 1 ? 'Employee' : 'Employees'}`, "Count"]}
+          itemStyle={{ color: "#000000" }}
+          labelStyle={{ color: "#000000" }}
         />
         <Legend />
       </PieChart>
     </ResponsiveContainer>
-  );
+  )
 }
