@@ -6,11 +6,12 @@ import { getToken } from "next-auth/jwt";
 // This still works in Next.js 16.1.1 and is safe to use for production
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const authSecret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET;
 
   // Get the token from the session
   const token = await getToken({
     req: request,
-    secret: process.env.AUTH_SECRET,
+    secret: authSecret,
     secureCookie: process.env.NODE_ENV === "production", // Use secure cookies in production
   });
 

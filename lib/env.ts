@@ -11,7 +11,8 @@ const envSchema = z.object({
     DATABASE_URL: z.string().url("DATABASE_URL must be a valid URL"),
 
     // Authentication
-    AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters for security"),
+    AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters for security").optional(),
+    NEXTAUTH_SECRET: z.string().min(32, "NEXTAUTH_SECRET must be at least 32 characters for security").optional(),
     NEXTAUTH_URL: z.string().url("NEXTAUTH_URL must be a valid URL").optional(),
 
     // Cron Jobs
@@ -30,6 +31,14 @@ const envSchema = z.object({
 
     // Environment
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+}).superRefine((values, ctx) => {
+    if (!values.AUTH_SECRET && !values.NEXTAUTH_SECRET) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "AUTH_SECRET or NEXTAUTH_SECRET is required",
+            path: ["AUTH_SECRET"],
+        });
+    }
 });
 
 // Validate environment variables

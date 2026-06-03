@@ -41,8 +41,12 @@ async function runSmokeTests() {
 
     // 3. System Configuration
     process.stdout.write("⚙️  Checking Environment Variables... ");
-    const requiredVars = ["DATABASE_URL", "NEXTAUTH_SECRET", "NEXTAUTH_URL"];
+    const requiredVars = ["DATABASE_URL", "NEXTAUTH_URL"];
     const missing = requiredVars.filter(v => !process.env[v]);
+    const hasAuthSecret = !!(process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET);
+    if (!hasAuthSecret) {
+        missing.push("AUTH_SECRET or NEXTAUTH_SECRET");
+    }
 
     if (missing.length === 0) {
         console.log("✅ PASSED");
